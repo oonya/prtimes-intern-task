@@ -2,6 +2,7 @@ package main
 
 import (
 	crand "crypto/rand"
+	"crypto/sha512"
 	"fmt"
 	"html/template"
 	"io"
@@ -9,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"crypto/sha512"
 	"path"
 	"regexp"
 	"strconv"
@@ -53,7 +53,7 @@ type Post struct {
 	CreatedAt    time.Time `db:"created_at"`
 	CommentCount int
 	Comments     []Comment
-	User         User
+	User         User `db:"u"`
 	CSRFToken    string
 }
 
@@ -197,13 +197,7 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 		}
 
 		p.CSRFToken = csrfToken
-
-		if p.User.DelFlg == 0 {
-			posts = append(posts, p)
-		}
-		if len(posts) >= postsPerPage {
-			break
-		}
+		posts = append(posts, p)
 	}
 
 	return posts, nil
@@ -373,7 +367,14 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err := db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC")
+	query := `select posts.id, posts.user_id, body, mime, posts.created_at,
+				users.id as "u.id", users.account_name as "u.account_name", passhash as "u.passhash", authority as "u.authority", del_flg as "u.del_flg", users.created_at as "u.created_at"
+				FROM posts
+				inner join users on posts.user_id = users.id
+				WHERE users.del_flg = 0
+				ORDER BY posts.created_at DESC
+				LIMIT ?`
+	err := db.Select(&results, query, postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return
@@ -419,7 +420,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
+	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC LIMIT ?", user.ID, postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return
@@ -507,7 +508,16 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC", t.Format(ISO8601Format))
+
+	query := `select posts.id, posts.user_id, body, mime, posts.created_at,
+				users.id as "u.id", users.account_name as "u.account_name", passhash as "u.passhash", authority as "u.authority", del_flg as "u.del_flg", users.created_at as "u.created_at"
+				FROM posts
+				inner join users on posts.user_id = users.id
+				WHERE users.del_flg = 0 AND posts.created_at <= ?
+				ORDER BY posts.created_at DESC
+				LIMIT ?`
+
+	err = db.Select(&results, query, t.Format(ISO8601Format), postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return
@@ -543,7 +553,7 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.Select(&results, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	err = db.Select(&results, "SELECT * FROM `posts` WHERE `id` = ? LIMIT ?", pid, postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return
