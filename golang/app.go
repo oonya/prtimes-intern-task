@@ -211,26 +211,39 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 }
 
 func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, error) {
-	var posts []Post
+ 	commentQuery := `SELECT comments.id, post_id, user_id, comment, comments.created_at,
+				users.id as "u.id", account_name as "u.account_name", passhash as "u.passhash", authority as "u.authority", del_flg as "u.del_flg", users.created_at as "u.created_at"
+				FROM comments
+				INNER JOIN users ON comments.user_id = users.id
+				WHERE comments.post_id = ?
+				ORDER BY comments.created_at DESC`
+	if !allComments {
+		commentQuery += " LIMIT 3"
+	}
 
+	commentStmt, err := db.Preparex(commentQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer commentStmt.Close()
+
+ 	countQuery := `SELECT COUNT(*) AS count FROM comments WHERE post_id = ?`
+	countStmt, err := db.Preparex(countQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer countStmt.Close()
+
+	var posts []Post
+	
 	for _, p := range results {
-		err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
+		err := countStmt.Get(&p.CommentCount, p.ID)
 		if err != nil {
 			return nil, err
 		}
 
-		query := `SELECT comments.id, post_id, user_id, comment, comments.created_at,
-					users.id as "u.id", account_name as "u.account_name", passhash as "u.passhash", authority as "u.authority", del_flg as "u.del_flg", users.created_at as "u.created_at"
-					FROM comments
-					INNER JOIN users ON comments.user_id = users.id
-					WHERE comments.post_id = ?
-					ORDER BY comments.created_at DESC`
-
-		if !allComments {
-			query += " LIMIT 3"
-		}
 		var comments []Comment
-		err = db.Select(&comments, query, p.ID)
+		err = commentStmt.Select(&comments, p.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -816,6 +829,7 @@ func main() {
 
 	dsn := fmt.Sprintf(
 		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&loc=Local",
+		// "%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&loc=Local&interpolateParams=true",
 		user,
 		password,
 		host,
