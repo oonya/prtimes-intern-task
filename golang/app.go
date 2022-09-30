@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	crand "crypto/rand"
 	"crypto/sha512"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
@@ -34,9 +36,16 @@ var (
 	loginTemplate *template.Template
 	registerTemplate *template.Template
 	accountNameTemplate *template.Template
-	getPostsTemplate *template.Template
+	postsTemplate *template.Template
 	postIDTemplate *template.Template
 	adminBannedTemplate *template.Template
+)
+
+var (
+	indexPostsM         sync.Mutex
+	indexPostsT         time.Time
+	indexPostsRenderedM sync.RWMutex
+	indexPostsRendered  []byte
 )
 
 const (
@@ -109,7 +118,7 @@ func init() {
 		getTemplPath("posts.html"),
 		getTemplPath("post.html"),
 	))
-	getPostsTemplate = template.Must(template.New("posts.html").Funcs(template.FuncMap{
+	postsTemplate = template.Must(template.New("posts.html").Funcs(template.FuncMap{
 		"imageURL": imageURL,
 	}).ParseFiles(
 		getTemplPath("posts.html"),
@@ -414,11 +423,16 @@ func getLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-func getIndex(w http.ResponseWriter, r *http.Request) {
-	me := getSessionUser(r)
+func renderIndexPosts() {
+	now := time.Now()
+	indexPostsM.Lock()
+	defer indexPostsM.Unlock()
+	if indexPostsT.After(now) {
+		return
+	}
+	indexPostsT = time.Now()
 
 	results := []Post{}
-
 	query := `select posts.id, posts.user_id, body, mime, posts.created_at,
 				users.id as "u.id", users.account_name as "u.account_name", passhash as "u.passhash", authority as "u.authority", del_flg as "u.del_flg", users.created_at as "u.created_at"
 				FROM posts
@@ -432,18 +446,41 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	posts, err := makePosts(results, getCSRFToken(r), false)
+	posts, err := makePosts(results, "[[[CSRFTOKEN]]]", false)
 	if err != nil {
 		log.Print(err)
 		return
 	}
+	
+	var b bytes.Buffer
+	if err := postsTemplate.Execute(&b, posts); err != nil {
+		log.Println(err)
+		return
+ 	}
+	indexPostsRenderedM.Lock()
+	indexPostsRendered = b.Bytes()
+	indexPostsRenderedM.Unlock()
+}
 
-	indexTemplate.Execute(w, struct {
-		Posts     []Post
-		Me        User
-		CSRFToken string
-		Flash     string
-	}{posts, me, getCSRFToken(r), getFlash(w, r, "notice")})
+func getIndexPosts(csrf string) template.HTML {
+	indexPostsRenderedM.RLock()
+	t := bytes.Replace(indexPostsRendered, []byte("[[[CSRFTOKEN]]]"), []byte(csrf), -1)
+	indexPostsRenderedM.RUnlock()
+	return template.HTML(string(t))
+}
+
+func getIndex(w http.ResponseWriter, r *http.Request) {
+	me := getSessionUser(r)
+	csrf := getCSRFToken(r)
+	posts := getIndexPosts(csrf)
+
+	indexTemplate.Execute(w,
+		map[string]interface{}{
+			"Me":        me,
+			"CSRFToken": csrf,
+			"Flash":     getFlash(w, r, "notice"),
+			"Posts":     posts},
+	)
 }
 
 func getAccountName(w http.ResponseWriter, r *http.Request) {
@@ -568,7 +605,7 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	getPostsTemplate.Execute(w, posts)
+	postsTemplate.Execute(w, posts)
 }
 
 func getPostsID(w http.ResponseWriter, r *http.Request) {
@@ -683,6 +720,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	renderIndexPosts()
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 }
 
@@ -743,6 +781,7 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	renderIndexPosts()
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
 
@@ -801,6 +840,7 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 		db.Exec(query, 1, id)
 	}
 
+	renderIndexPosts()
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }
 
@@ -842,6 +882,8 @@ func main() {
 		log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	}
 	defer db.Close()
+
+	renderIndexPosts()
 
 	r := chi.NewRouter()
 
